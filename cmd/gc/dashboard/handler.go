@@ -10,9 +10,11 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
+
 
 // Embed the compiled SPA bundle produced by `cmd/gc/dashboard/web/`.
 // The bundle is a Vite build output: one index.html (with a
@@ -52,17 +54,28 @@ type clientLogEntry struct {
 // its own port, the supervisor binds another, the browser talks to
 // both).
 func NewStaticHandler(supervisorURL string) (http.Handler, error) {
-	sub, err := fs.Sub(spaBundle, "web/dist")
-	if err != nil {
-		return nil, fmt.Errorf("dashboard: embed sub fs: %w", err)
+	var targetFS fs.FS
+	localPath := "cmd/gc/dashboard/web/dist"
+
+	if localDirExists(localPath) {
+		targetFS = os.DirFS(localPath)
+		log.Printf("dashboard: serving UI assets from local directory %s", localPath)
+	} else {
+		sub, err := fs.Sub(spaBundle, "web/dist")
+		if err != nil {
+			return nil, fmt.Errorf("dashboard: embed sub fs: %w", err)
+		}
+		targetFS = sub
 	}
-	indexBytes, err := fs.ReadFile(sub, "index.html")
+
+	indexBytes, err := fs.ReadFile(targetFS, "index.html")
 	if err != nil {
-		return nil, fmt.Errorf("dashboard: read embedded index.html: %w", err)
+		return nil, fmt.Errorf("dashboard: read index.html: %w", err)
 	}
 	indexWithURL := injectSupervisorURL(indexBytes, supervisorURL)
 
-	fileServer := http.FileServer(http.FS(sub))
+	fileServer := http.FileServer(http.FS(targetFS))
+
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/__client-log", handleClientLog)
@@ -85,7 +98,7 @@ func NewStaticHandler(supervisorURL string) (http.Handler, error) {
 			_, _ = w.Write(indexWithURL)
 			return
 		}
-		if _, err := fs.Stat(sub, path); err == nil {
+		if _, err := fs.Stat(targetFS, path); err == nil {
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			fileServer.ServeHTTP(w, r)
 			return
@@ -214,3 +227,12 @@ func logRequest(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func localDirExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
