@@ -1615,7 +1615,7 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	result := make([]Bead, 0, len(issues))
 	for i := range issues {
 		bead := issues[i].toBead()
-		if IsReadyExcludedType(bead.Type) {
+		if IsReadyExcludedBead(bead) {
 			continue
 		}
 		if bead.Ephemeral {

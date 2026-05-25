@@ -21,9 +21,36 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
+
+func TestDrainItemRecipeVarsIncludesRuntimeMetadata(t *testing.T) {
+	recipe := &formula.Recipe{
+		Steps: []formula.RecipeStep{{
+			ID:     "item",
+			IsRoot: true,
+			Metadata: map[string]string{
+				"gc.input_convoy_id":              "CONVOY-1",
+				graphv2.RuntimeVarsMetadataKey:    graphv2.RuntimeVarsMetadata(map[string]string{"region": "west", graphv2.ConvoyIDVar: "ignored"}),
+				"gc.unrelated_runtime_vars_noise": "ignored",
+			},
+		}},
+	}
+
+	vars, err := drainItemRecipeVars(recipe)
+	if err != nil {
+		t.Fatalf("drainItemRecipeVars: %v", err)
+	}
+	if vars["convoy_id"] != "CONVOY-1" || vars["region"] != "west" {
+		t.Fatalf("vars = %#v, want convoy_id and inherited region", vars)
+	}
+	if _, ok := vars["issue"]; ok {
+		t.Fatalf("vars = %#v, want reserved issue excluded", vars)
+	}
+}
 
 func TestOpenSourceWorkflowStoresSkipsBrokenRigs(t *testing.T) {
 	// Regression: when a single rig's bead store is unopenable (broken
@@ -412,6 +439,96 @@ func TestWorkflowFormulaSearchPathsUsesRoutedRigLayers(t *testing.T) {
 	})
 	if len(control) != 2 || control[1] != "/rig/frontend/formulas" {
 		t.Fatalf("workflowFormulaSearchPaths(control frontend) = %#v, want rig-specific layers", control)
+	}
+
+	directControl := workflowFormulaSearchPaths(cfg, beads.Bead{
+		Metadata: map[string]string{
+			"gc.routed_to":                  config.ControlDispatcherAgentName,
+			graphExecutionRouteMetaKey:      "session-123",
+			graphExecutionRigContextMetaKey: "frontend",
+		},
+	})
+	if len(directControl) != 2 || directControl[1] != "/rig/frontend/formulas" {
+		t.Fatalf("workflowFormulaSearchPaths(direct control frontend) = %#v, want rig-specific layers", directControl)
+	}
+}
+
+func TestDecorateDrainItemRecipeUsesDirectExecutionRoute(t *testing.T) {
+	store := beads.NewMemStore()
+	direct, err := store.Create(beads.Bead{
+		Title:  "direct session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"session_name": "sky-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+	}
+	config.InjectImplicitAgents(cfg)
+	recipe := &formula.Recipe{
+		Name: "item",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "item",
+				IsRoot: true,
+				Type:   "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			},
+			{
+				ID:    "item.work",
+				Title: "Work",
+				Type:  "task",
+			},
+			{
+				ID:    "item.check",
+				Title: "Check",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind": "check",
+				},
+			},
+		},
+	}
+	source := beads.Bead{
+		ID: "drain-control",
+		Metadata: map[string]string{
+			graphExecutionRouteMetaKey:      direct.ID,
+			graphExecutionRigContextMetaKey: "frontend",
+		},
+	}
+
+	if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+		t.Fatalf("decorateDrainItemRecipe: %v", err)
+	}
+	work := recipe.StepByID("item.work")
+	if work == nil {
+		t.Fatal("missing item.work")
+	}
+	if work.Assignee != direct.ID {
+		t.Fatalf("item.work assignee = %q, want direct session %s", work.Assignee, direct.ID)
+	}
+	if got := work.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("item.work gc.routed_to = %q, want direct session assignment without route metadata", got)
+	}
+	check := recipe.StepByID("item.check")
+	if check == nil {
+		t.Fatal("missing item.check")
+	}
+	if got := check.Metadata[graphExecutionRouteMetaKey]; got != direct.ID {
+		t.Fatalf("item.check execution route = %q, want direct session %s", got, direct.ID)
+	}
+	if got := check.Metadata[graphExecutionRigContextMetaKey]; got != "frontend" {
+		t.Fatalf("item.check execution rig context = %q, want frontend", got)
 	}
 }
 
